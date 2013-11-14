@@ -1,0 +1,313 @@
+
+ArduPPM version 3.01
+
+
+PPM REDUNDANCY MODE MANUAL
+
+Olivier ADLER 2013
+
+
+
+Introductory :
+------------------
+
+
+PPM redundancy mode is a dual input PPM passthrough mode, with automatic switchover if one input is lost.
+
+
+How to connect ?
+------------------------
+
+PPM input 1 (primary receiver) : PWM connector channel 1
+
+PPM input 2 (secondary receiver ) : PWM connector channel 5
+
+The two radio receivers can have different frame formats (polarity, channel count, sync width, frame period) and do no not need to be synchronized.
+
+
+How to enable PPM redundancy mode ?
+-------------------------------------------------------
+
+To enable PPM redundancy mode, short the servo input channel 7 & 8 signal pins together using a jumper strap. The jump must be present before powering the APM board. This jumper is checked during bootup, the ArduPPM mode will not change if this jumper is removed or lost during operation.
+
+To confirm redundancy mode, the green LED will light on the APM 2.x board near the USB port.
+
+
+What will it do ?
+---------------------
+
+This mode can replace advantageously the actual PPM passthrough mode, even if used with a single input, to sanitize the PPM signal, avoiding APM interrupt overload if something goes very wrong at the receiver side (mad PPM signal). This is something that is unlikely to occur, but it is still good to be protected.
+
+The biggest improvement is the possibility to use two receivers at the same time, for example a GHz link and a MHz link for redundancy.
+
+Another important point is that this version inaugurate the latest Ardupilot failsafe strategy that can be summarized like this :
+
+1 - If some or all input channels are lost, the PPM encoder will output a 700 us signal on each lost channel to signal a receiver problem and let the APM main code decide what to do with the remaining signals. The APM will log a receiver fault and the faulty channels.
+
+2 - If the PPM encoder has a hardware problem and its output become silent, then the  APM main code will enter failsafe mode and log a PPM encoder fault.
+
+
+Some standard or  more creative uses of the redundancy mode :
+
+- Single PPM input sanitizer : to check for a clean signal before to send it to the APM
+
+- Classical redundancy with two receivers : if a radio link is lost, the remaining one takes precedence. This feature will take benefit of using a GHz link as the primary one and a MHz link as the secondary one, effectively enhancing radio redundancy using very different frequency bands.
+
+
+Because the redundancy mode has a manual switchover control, those creative uses are very possible :
+
+- Teacher / student mode : using the force channel, it’s possible to give control to the student from a teacher transmitter switch.
+
+- Dual pilots setups : to fly in large areas or when there are large obstacles it can be useful to share the RC control with a second pilot.
+
+In those cases, each receiver needs to be paired with a separate transmitter.
+
+
+Because the RC sharing occur at the model location in the air it is a decisive advantage over linking RC transmitters on the ground using a cable or a GHz link. When ground linking offers about hundred  meters of reliable distance separation (or even less if there are obstacles), air sharing could allow for a few hundred meters or even more.
+
+
+How does it work ?
+--------------------------
+
+PPM redundancy mode will closely watch the input signals, checking for sync and channel validity. It will switchover PPM inputs if one of them becomes invalid.
+
+PPM input 1 is the preferred input, it will switch to PPM input 2 during a forced switchover, or if channel 1 is invalid and channel 2 is valid. If both signals are valid, input 1 is selected.
+
+In other words If input 1 receiver has a valid PPM signal, then it will be selected regardless input 2 status.
+
+If both signals become invalid, then the failsafe strategy is triggered. The default method is to send 700us on all channels for the PPM redundancy mode. Another possibility is to mute the output or load different failsafe values. Those options are available at compile time.
+
+There is a provision to manually force the switchover, using PPM 1 input last channel (or another channel chosen at compile time). To force PPM2 input, the last channel of PPM1 needs to be set > 2000 us. We’ll see later that this feature is something quite interesting.
+
+To summarize : to force PPM2 : PPM1 last channel > 2000 us
+
+If the PPM input 2 is lost during a forced switchover to input 2, it will switch back to channel 1.
+
+
+Witch PPM formats are compatible ?
+--------------------------------------------
+
+
+PPM redundancy mode accept standard PPM signals, commonly known as Futaba trainer interface signals :
+
+Negative PPM frame :
+
+¯¯¯|__|¯¯¯¯¯¯¯¯|__|¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯|__|¯¯¯¯¯¯¯¯|__|¯¯¯¯¯¯¯¯|__|¯¯¯¯¯¯
+----->|<---ch8--->|<----frame sync symbol---->|----ch1----|----ch2----|----ch3--
+                
+  
+Positive PPM frame :
+
+___|¯¯|________|¯¯|________________________|¯¯|________|¯¯|________|¯¯|______
+----->|<---ch8--->|<----frame sync symbol---->|----ch1----|----ch2----|----ch3--
+        
+
+The PPM polarity and channel count is automatically detected during first PPM input acquisitions.
+Then the decoder keeps this setting until power off.
+
+
+It does accept :
+
+- negative (more common) or positive PPM polarity with initial detection.
+
+- from 5 to 16 channels with initial channel count auto detection (settable at compile time).
+
+- channels lengths from 725 to 2275 us (settable at compile time).
+
+- channel sync pulse lengths (prepulse) from 200us to 525 us (settable at compile time).
+
+- frame sync lengths from 2700 us to 32 ms (settable at compile time).
+
+
+The PPM input validity monitoring is agnostic to frame period and frame period variability, as soon as channel sync and frame sync timings are ok. This is a desired feature because some transmitters do not deliver a stable frame period and anyway frame period stability is not necessary to correctly transfer a PPM signal. This is even more true with GHz links, where error correction in the air  protocol can delay some frames.
+
+
+There are a couple more options settable at compile time :
+
+- force switchover channel
+
+- allow polarity detection after a watchdog event
+
+- allow channel new detection after a watchdog event
+
+- allow dynamic channel count detection
+
+- failsafe strategy options
+
+
+The redundancy mode has been successfully tested with a Jeti R8 receiver (firmware 3.01), with PPM signals ranging from 4 to 16 channels in both polarity mode, with period length from 10 to 30 ms.
+
+
+Best practices for receiver settings
+-----------------------------------------------
+
+It is recommended to use the more reliable and precise receiver on PPM input 1 (preferably a receiver with error detection on it like most 2.4 GHz RC radio systems).
+
+It is recommended to set the primary receiver to cut its PPM sum output when a radio link loss do occur so that PPM input 2 switchover can occur.
+
+An alternative method is to set the primary receiver failsafe so that channel 9 will output a 100% value during a radio link loss. This will be used for safely switching to channel 2 through the switchover force method.
+It is possible to change the channel used for switching to the secondary receiver by recompilation.
+
+
+Led monitoring :
+----------------------------
+
+In PPM redundancy mode TX and RX LEDs have a different meaning :
+
+TX - OFF         = PPM1 input valid
+TX - ON          = PPM1 channel sync or channel error
+
+RX - OFF         = PPM2 input valid
+RX - ON          = PPM2 channel sync or channel error
+
+C7 - ON          = PPM redundancy mode active (Green LED)
+C7 - SLOW TOGGLE = PPM redundancy mode : PPM2 switchover
+
+
+---------------------------------------------------------------------------------------
+Note for testers and developers :
+
+Channel 1 and 5 inputs as well as the jump strap between channel 7 and 8 have been chosen to avoid conflicting with the SPI port, so that easier debugging and programming can be done without using a one wire debug connection.
+
+Using this setup, it is possible to program and debug using a 6 pin ISP probe connector, in ISP mode or One wire mode. So you’ll not need a non standard one wire cable. Your probe will work in both modes without any problem. This is nice if if you prefer to stay away from one wire debugging.
+Because PPM Passthrough mode is using a jump between channel 2 and 3, mode detection will not work if a 6 pin probe is connected to the SPI port. To solve the problem you could disconnect the probe before powering on, or force the encoder mode modifying servo_input_mode variable initialization.
+
+In some circumstances, the AVR MEGA chips can stay locked in one wire debug mode without possibility to get it disabled. So if you don’t absolutely need this mode, it could be better to stay away from it. We can suppose that ATMEL did solve this issue in recent production batches but I personally bricked an APM board last year because of that.
+
+I did the actual debug in one wire mode using AVR Studio 5 to be able to probe variables and set breakpoints. It’s the only debug mode that do allow this with the 32U2 chip. ISP will only permitt programming and fuses settings.
+
+As a supplementary debug help (at least in the release candidate version), i did modify the Arduino USB driver so that RX and TX leds are disabled during USB communication. They are dedicated to the PPM redundancy mode monitoring. The APM board can be connected to Mission Planner to read  radio PWM values for verifications. The TX / RX LEDs will be dedicated to PPM redundancy mode error reporting avoiding the USB dancing LED pattern.
+
+Failsafe note : the 700 us failsafe signal value was chosen to allow using radio transmitters at their maximum 150 % channel range (750 us – 2250 us) without affecting failsafe signaling that will occur below at 700 us. Such a very large range could be used for example to enhance channel resolution.
+
+Happy testing and flying.
+
+Olivier ADLER – 2013 -
+
+
+
+Compile time options for redundancy mode :
+
+
+// -------------------------------------------------------------
+// FAILSAFE MODE
+// -------------------------------------------------------------
+
+// FAILSAFE_EXTRA_LOW is the prefered new failsafe method
+// Check compatibility with your APM board firmware
+// Channel failsafe value for each lost or invalid channel
+// will be the extra low value specified with PPM_CHANNEL_LOSS setting
+// available in the "PPM output special values" section
+
+#define FAILSAFE_MUTE      0  // Failsafe method muting ppm output ( mainly for use with other systems )
+#define FAILSAFE_THROTTLE  1  // Legacy throtlle failsafe method using a low value (900 us) on the throttle channel
+#define FAILSAFE_EXTRA_LOW 2  // Prefered method using extra low PWM values on missing channels
+
+#define _FAILSAFE_METHOD_ FAILSAFE_THROTTLE  // Select the failsafe method here
+
+// -----------------------------------------------------------------------------------------------------------
+// PPM REDUNDANCY MODE SETTINGS
+// -----------------------------------------------------------------------------------------------------------
+
+#define AUTODETECTED_LAST_PPM1_CHANNEL   255 //Do not change this.
+
+// SWITCHOVER FORCE PPM VALUE
+#define PPM1_SWITCHOVER_FORCE_VAL_MIN	TICKS_FOR_ONE_US * 2000
+#define PPM_SWITCHOVER_CHANNEL		AUTODETECTED_LAST_PPM1_CHANNEL	// Receiver 1 PPM channel to force input 2.
+                                    // Use "AUTODETECTED_LAST_PPM1_CHANNEL" to use the last channel of PPM1 input (automatically detected)
+                                    // Use "0" to disable switchover control from PPM1 input
+                                    // Use a number for selecting a specific channel.
+                                    // Should be between 6 to 16 because the APM needs at least channels 1 - 5 for model control
+									// Preferably between 9 to 16 so that channels 1 to 8 are free for APM use.
+                                    
+#define RESTART_POLARITY_DETECTION_AFTER_WATCHDOG       // Comment to disable. Allow adaptation to a new channel count during normal operation.
+#define RESTART_CHANNEL_COUNT_DETECTION_AFTER_WATCHDOG  // Comment to disable. Allow adaptation to a new channel count after a watchdog interrupt
+                                                        // ! The watchdog trigger only if PPM1 and PPM2 signals are both fully dead during more than 250 ms (0.25s).
+
+//#define DYNAMIC_CHANNEL_COUNT_DETECTION                 // Comment to disable. Allow adaptation to a new channel count during normal operation.
+
+#define SWITCHOVER_2_to_1_DELAY		100	// Frame count delay for switching back to receiver 1 if both inputs are valid
+
+#define MISSING_CHANNELS                    10  // Each PPM input is checking the validity of other one.
+                                                // This value represente the missing PPM channels of the opposite PPM input before declaring it invalid.
+                                                // This method is used because a dead input cannot update anymore its validity checks (wrong validity report).
+                                                // If the PPM inputs are not synchronous (different transmitters) this value should not be set too low
+                                                // Or this could cause wrong invalid detections in extreme cases.
+                                                
+#define POLARITY_DETECTION_THRESHOLD        80  // Valid needed prepulses before polarity detection validation
+#define CHANNEL_COUNT_DETECTION_THRESHOLD	10  // Identical frames needed before channel count validation
+
+
+// ----------------------------
+// PPM1 input : frame format
+// ----------------------------
+ 
+// PPM channel count limits
+
+//#if ( PPM_SWITCHOVER_CHANNEL != 0 )
+//    #define PPM1_MIN_CHANNELS        PPM_SWITCHOVER_CHANNEL
+//#else
+    #define PPM1_MIN_CHANNELS        5
+//#endif
+
+#define PPM1_MAX_CHANNELS        16
+
+// Values are expressed in microseconds
+
+// PPM channel value limits
+#define PPM1_CHANNEL_VALUE_MIN           TICKS_FOR_ONE_US * 725
+#define PPM1_CHANNEL_VALUE_MAX           TICKS_FOR_ONE_US * 2275
+
+//------------------------------------------------------------------------------------------------------
+// Change this only if you know what your are doing !
+
+// Sync detection
+#define PPM1_FRAME_SYNC_DETECTION_MARGIN         TICKS_FOR_ONE_US * 425
+#define PPM1_CHANNEL_SYNC_DETECTION_MARGIN       TICKS_FOR_ONE_US * 200
+
+#define PPM1_SYNC_LENGTH_MAX		 TICKS_FOR_ONE_US * 30000
+
+//Values below are automatically computed
+
+// PPM prepulses length
+#define PPM1_PREPULSE_MIN            PPM1_CHANNEL_SYNC_DETECTION_MARGIN
+#define PPM1_PREPULSE_MAX            PPM1_CHANNEL_VALUE_MIN - PPM1_CHANNEL_SYNC_DETECTION_MARGIN
+
+// Frame sync minimum lenght
+#define PPM1_SYNC_LENGTH_MIN		 PPM1_CHANNEL_VALUE_MAX + PPM1_FRAME_SYNC_DETECTION_MARGIN
+
+
+// ----------------------------
+// PPM2 input : frame format
+// ----------------------------
+ 
+// PPM channel count limits
+#define PPM2_MIN_CHANNELS     5
+#define PPM2_MAX_CHANNELS     16
+
+// Values are expressed in microseconds
+
+// PPM channel value limits
+#define PPM2_CHANNEL_VALUE_MIN           TICKS_FOR_ONE_US * 725
+#define PPM2_CHANNEL_VALUE_MAX           TICKS_FOR_ONE_US * 2275
+
+//------------------------------------------------------------------------------------------------------
+// Change this only if you know what your are doing !
+
+// Sync detection
+#define PPM2_FRAME_SYNC_DETECTION_MARGIN         TICKS_FOR_ONE_US * 425
+#define PPM2_CHANNEL_SYNC_DETECTION_MARGIN       TICKS_FOR_ONE_US * 200
+#define PPM2_SYNC_LENGTH_MAX		 TICKS_FOR_ONE_US * 30000
+
+//Values below are automatically computed
+
+// PPM prepulses length
+#define PPM2_PREPULSE_MIN            PPM2_CHANNEL_SYNC_DETECTION_MARGIN
+#define PPM2_PREPULSE_MAX            PPM2_CHANNEL_VALUE_MIN - PPM2_CHANNEL_SYNC_DETECTION_MARGIN
+
+// Frame sync minimum lenght
+#define PPM2_SYNC_LENGTH_MIN		 PPM2_CHANNEL_VALUE_MAX + PPM2_FRAME_SYNC_DETECTION_MARGIN
+
+
+
+
