@@ -1070,7 +1070,7 @@ ISR( SERVO_INT_VECTOR )
 
 
 // ------------------------------------------------------------------------------
-// PPM redundancy mode (negative polarity)
+// PPM redundancy mode
 // ------------------------------------------------------------------------------
 			
 	if( input_mode == PPM_REDUNDANCY_MODE )
@@ -1265,11 +1265,9 @@ ISR( SERVO_INT_VECTOR )
  
 		} // End : polarity_detection function
         
-        
         // ------------------------------------------------------
 		// PPM redundancy mode - Channel count detector function
 		// ------------------------------------------------------
-		
         inline void channel_count_detection( uint8_t ppm_input )
 		{
             if ( ppm_flag[ppm_input].ppm_count_detection_started == false) // If count detection is not started
@@ -1347,6 +1345,34 @@ ISR( SERVO_INT_VECTOR )
             ppm_var[ppm_input].ppm_channel = 0;                             // Reset ppm channel
            
 		} // End : channel_count_detection function
+        
+        // ------------------------------------------------------
+		// PPM redundancy mode - Dead channel detector
+		// ------------------------------------------------------
+        inline void dead_channel_detector ( uint8_t ppm_input )
+        {
+            if( ppm_var[ppm_input].ppm_dead_detector_previous_channel == ppm_var[ppm_input].ppm_channel ) // if current channel did not change
+            {
+                ppm_var[ppm_input].ppm_dead_counter++; // Increment channel dead counter
+                if( ppm_var[ppm_input].ppm_dead_counter > MISSING_CHANNELS ) // If other channel dead counter rise over detection threshold then reset channel and declare it invalid.
+                {
+                    ppm_flag[ppm_input].ppm_valid = false;
+                    ppm_flag[ppm_input].ppm_sync_error = true;
+                    ppm_flag[ppm_input].ppm_sync = false;
+                    ppm_flag[ppm_input].ppm_channel_error = true;
+                    ppm_flag[ppm_input].ppm_frame_completed = false;
+                    
+                    ppm_var[ppm_input].ppm_channel = 0;
+                    ppm_var[ppm_input].ppm_dead_counter = 0;
+                    ppm_var[ppm_input].ppm_dead_detector_previous_channel = 255;
+                }
+            }
+            else // if channel index is changing then reset dead counter
+            {
+                ppm_var[ppm_input].ppm_dead_counter  = 0;
+            }
+            ppm_var[ppm_input].ppm_dead_detector_previous_channel = ppm_var[ppm_input].ppm_channel; // Store previous channel index
+        } // End : Dead channel detector
 
         
         //-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -1470,34 +1496,10 @@ ISR( SERVO_INT_VECTOR )
                     // Store prepulse start time
                     ppm_var[ppm_input].ppm_prepulse_start = servo_time;
                     
-                    // Dead channel detector
-                   
-                    ppm_input = !ppm_input; // inverse channel input parameter to target the other channel
-                    
-                    if ( ppm_flag[ppm_input].ppm_valid == true ) // If PPM(other ppm input) is indicated as valid check if it is pulsing
-                    // This is to remove the wrong validity detection that could occur if signal disappeared after a valid check
+                    if ( ppm_flag[ppm_input].ppm_valid == true ) // If other PPM input) is indicated as valid check if it is really pulsing
+                    // This is to remove the wrong validity status that could remain if signal disappeared after a valid check
                     {
-                        if( ppm_var[ppm_input].ppm_dead_detector_previous_channel == ppm_var[ppm_input].ppm_channel ) // current channel did not change
-                        {
-                            ppm_var[ppm_input].ppm_dead_counter++; // Increment channel dead counter
-                            if( ppm_var[ppm_input].ppm_dead_counter > MISSING_CHANNELS ) // If other channel dead counter rise over detection threshold then reset channel and declare it invalid.
-                            {
-                                ppm_flag[ppm_input].ppm_valid = false;
-                                ppm_flag[ppm_input].ppm_sync_error = true;
-                                ppm_flag[ppm_input].ppm_sync = false;
-                                ppm_flag[ppm_input].ppm_channel_error = true;
-                                ppm_flag[ppm_input].ppm_frame_completed = false;
-                                
-                                ppm_var[ppm_input].ppm_channel = 0;
-                                ppm_var[ppm_input].ppm_dead_counter = 0;
-                                ppm_var[ppm_input].ppm_dead_detector_previous_channel = 255;
-                            }
-                        }
-                        else // if channel index is changing then reset dead counter
-                        {
-                            ppm_var[ppm_input].ppm_dead_counter  = 0;
-                        }
-                        ppm_var[ppm_input].ppm_dead_detector_previous_channel = ppm_var[ppm_input].ppm_channel; // Store previous channel index
+                        dead_channel_detector ( !ppm_input ); // Run dead channel detector for the other input
                     }
                 }
             }
