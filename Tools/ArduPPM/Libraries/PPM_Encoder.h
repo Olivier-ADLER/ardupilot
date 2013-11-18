@@ -212,10 +212,10 @@
 //        - PPM redundancy mode : implemented sync PPM output
 //        - PPM redundancy mode : adding specific LED control
 //        - Watchdog interrupt : add code for redundancy mode
-//        - Watchdog interrupt : remove the legacy failsafe method (throttle = 900 us)
+//        - Watchdog interrupt : removed the legacy failsafe method for servo mode (throttle = 900 us and load all other channels with default values)
 //        - PPM encoder init : add code for PPM redundancy mode
 //        - arduino USB code : disabling LED control to allow PPM debugging with Mission Planner connected
-//        - Failsafe cleaning (see manual)
+//        - Failsafe changes : see manual
 // FAILSAFE_MUTE        // Failsafe method muting ppm output ( mainly for use with other systems )
 // FAILSAFE_THROTTLE    // Legacy throtlle failsafe method using a low value (900 us) on the throttle channel
 // FAILSAFE_EXTRA_LOW   // Prefered method using extra low PWM values on missing channels
@@ -1526,7 +1526,7 @@ ISR( SERVO_INT_VECTOR )
             }
         }
         // Run PPM decoder and auxiliary tasks
-        if ( servo_change & ( ( 1 << ppm_defn[PPM_CH1].ppm_pin ) | ( 1 << ppm_defn[PPM_CH2].ppm_pin ) ) ) // Check if we have a pin change on both PPM inputs
+        if ( ( servo_change & ( 1 << ppm_defn[PPM_CH1].ppm_pin ) ) && ( servo_change & ( 1 << ppm_defn[PPM_CH2].ppm_pin ) ) ) // Check if we have a pin change on both PPM inputs
         {
             ppm_decoder ( PPM_CH1 );   // run decoder function for each PPM input
             ppm_decoder ( PPM_CH2 );
@@ -1540,7 +1540,7 @@ ISR( SERVO_INT_VECTOR )
         {
             ppm_decoder ( PPM_CH1 );   // run decoder function PPM1 input
             
-            if ( ppm_flag[PPM_CH2].ppm_valid = true ) // run dead input detector if other input is marked as valid
+            if ( ppm_flag[PPM_CH2].ppm_valid == true ) // run dead input detector if other input is marked as valid
             {
                 dead_input_detector ( PPM_CH2 ); // run dead detector function for PPM2 input
             }   
@@ -1549,7 +1549,7 @@ ISR( SERVO_INT_VECTOR )
         {
             ppm_decoder ( PPM_CH2 );   // run decoder function PPM2 input
             
-            if ( ppm_flag[PPM_CH1].ppm_valid = true ) // run dead input detector if other input is marked as valid
+            if ( ppm_flag[PPM_CH1].ppm_valid == true ) // run dead input detector if other input is marked as valid
             {
                 dead_input_detector ( PPM_CH1 ); // run dead detector function for PPM1 input
             }   
