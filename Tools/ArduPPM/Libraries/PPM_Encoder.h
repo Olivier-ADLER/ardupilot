@@ -336,8 +336,18 @@ volatile uint8_t input_mode = JUMPER_SELECT_MODE;
 // PPM OUTPUT SETTINGS
 // -------------------------------------------------------------
 
-//#define _POSITIVE_PPM_FRAME_    // Switch to positive pulse PPM
-// (the actual timing is encoded in the length of the low between two pulses)
+//#define _POSITIVE_PPM_FRAME_    // PPM frame positive
+
+// PPM negative is the more common format :
+//
+// Negative PPM frame : ¯|__|¯¯¯¯¯¯¯¯|__|¯¯¯¯¯¯¯¯|__|¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯|__|¯¯¯¯¯¯¯¯|__|¯¯¯¯¯¯¯¯|__|¯¯¯¯¯¯¯¯|__|¯¯¯¯¯¯¯¯|__|¯¯¯¯¯¯¯¯|__|¯¯¯¯
+//                      --->|<---ch7--->|<---ch8--->|<-CH0--frame sync symbol-->|----ch1----|----ch2----|----ch3----|----ch4----|----ch5----|<--
+
+//
+// 
+// Positive PPM frame : _|¯¯|________|¯¯|________|¯¯|________________________|¯¯|________|¯¯|________|¯¯|________|¯¯|________|¯¯|________|¯¯|____
+//                      --->|<---ch7--->|<---ch8--->|<-CH0--frame sync symbol-->|----ch1----|----ch2----|----ch3----|----ch4----|----ch5----|<--
+
 // Output PPM channels
 #define PPM_CHANNELS        8
 // PPM period 18.5ms - 26.5ms (54hz - 37Hz) 
@@ -395,12 +405,7 @@ volatile uint8_t input_mode = JUMPER_SELECT_MODE;
  
 // PPM channel count limits
 
-//#if ( PPM_SWITCHOVER_CHANNEL != 0 )
-//    #define PPM1_MIN_CHANNELS        PPM_SWITCHOVER_CHANNEL
-//#else
-    #define PPM1_MIN_CHANNELS        5
-//#endif
-
+#define PPM1_MIN_CHANNELS        5
 #define PPM1_MAX_CHANNELS        16
 
 // Values are expressed in microseconds
@@ -423,10 +428,8 @@ volatile uint8_t input_mode = JUMPER_SELECT_MODE;
 // PPM prepulses length
 #define PPM1_PREPULSE_MIN            PPM1_CHANNEL_SYNC_DETECTION_MARGIN
 #define PPM1_PREPULSE_MAX            PPM1_CHANNEL_VALUE_MIN - PPM1_CHANNEL_SYNC_DETECTION_MARGIN
-
 // Frame sync minimum lenght
 #define PPM1_SYNC_LENGTH_MIN		 PPM1_CHANNEL_VALUE_MAX + PPM1_FRAME_SYNC_DETECTION_MARGIN
-
 
 // ----------------------------
 // PPM2 input : frame format
@@ -458,7 +461,6 @@ volatile uint8_t input_mode = JUMPER_SELECT_MODE;
 
 // Frame sync minimum lenght
 #define PPM2_SYNC_LENGTH_MIN		 PPM2_CHANNEL_VALUE_MAX + PPM2_FRAME_SYNC_DETECTION_MARGIN
-
 
 // ---------------------------------------------------------------------------------------------------------------
 // APM FAILSAFE VALUES
@@ -587,6 +589,34 @@ volatile uint8_t disconnected_channels;
 #define PPM1_PIN           PB0
 #define PPM2_PIN           PB4
 
+// ---------------------------------------------------------------------------
+// AVR parameters for ArduPilot MEGA v1.4 PPM Encoder (ATmega328P)
+// ---------------------------------------------------------------------------
+#elif defined (__AVR_ATmega328P__) || defined (__AVR_ATmega328__)
+
+#define SERVO_DDR             DDRD
+#define SERVO_PORT            PORTD
+#define SERVO_INPUT           PIND
+#define SERVO_INT_VECTOR      PCINT2_vect
+#define SERVO_INT_MASK        PCMSK2
+#define SERVO_INT_CLEAR_FLAG  PCIF2
+#define SERVO_INT_ENABLE      PCIE2
+#define SERVO_TIMER_CNT       TCNT1
+
+#define PPM_DDR               DDRB
+#define PPM_PORT              PORTB
+#define PPM_OUTPUT_PIN        PB2
+#define PPM_INT_VECTOR        TIMER1_COMPB_vect
+#define PPM_COMPARE           OCR1B
+#define PPM_COMPARE_MODE_BIT_0      COM1B0
+#define PPM_COMPARE_MODE_BIT_1      COM1B1
+#define PPM_COMPARE_ENABLE    OCIE1B
+#define PPM_COMPARE_FORCE_MATCH    FOC1B
+
+#else
+#error NO SUPPORTED DEVICE FOUND! (ATmega16u2 / ATmega32u2 / ATmega328p)
+#endif
+
 // -------------------------------
 // USB cable connection detection
 // -------------------------------
@@ -619,34 +649,6 @@ void EVENT_USB_Device_Disconnect(void)
     // when the bit is clear, USB is connected
     PORTD |= 1;
 }
-
-// ---------------------------------------------------------------------------
-// AVR parameters for ArduPilot MEGA v1.4 PPM Encoder (ATmega328P)
-// ---------------------------------------------------------------------------
-#elif defined (__AVR_ATmega328P__) || defined (__AVR_ATmega328__)
-
-#define SERVO_DDR             DDRD
-#define SERVO_PORT            PORTD
-#define SERVO_INPUT           PIND
-#define SERVO_INT_VECTOR      PCINT2_vect
-#define SERVO_INT_MASK        PCMSK2
-#define SERVO_INT_CLEAR_FLAG  PCIF2
-#define SERVO_INT_ENABLE      PCIE2
-#define SERVO_TIMER_CNT       TCNT1
-
-#define PPM_DDR               DDRB
-#define PPM_PORT              PORTB
-#define PPM_OUTPUT_PIN        PB2
-#define PPM_INT_VECTOR        TIMER1_COMPB_vect
-#define PPM_COMPARE           OCR1B
-#define PPM_COMPARE_MODE_BIT_0      COM1B0
-#define PPM_COMPARE_MODE_BIT_1      COM1B1
-#define PPM_COMPARE_ENABLE    OCIE1B
-#define PPM_COMPARE_FORCE_MATCH    FOC1B
-
-#else
-#error NO SUPPORTED DEVICE FOUND! (ATmega16u2 / ATmega32u2 / ATmega328p)
-#endif
 
 // ---------------------------------------------------------------------------
 // Global management flags and counters
@@ -758,16 +760,11 @@ void ppm_stop( void )
         // Reset toggle on compare output
         TCCR1A = 0;
                
-        if( input_mode == PPM_REDUNDANCY_MODE ) // If PPM redundancy mode leave timer 1 running for PPM input capture
-        {
-            // Start TIMER1 with 8x prescaler
-            // TCCR1B = ( 1 << CS11 );
-        }
-        else
+        if( input_mode != PPM_REDUNDANCY_MODE ) // If PPM redundancy mode leave timer 1 running for PPM input capture
         {
             TCCR1B = 0; // Stop timer 1
         }
-
+        
         // Indicate that PPM generator is not active
         ppm_generator_active = false;
 
@@ -799,7 +796,8 @@ ISR( WDT_vect ) // If watchdog is triggered then enable Watchdog triggered flag 
                         
             #if ( _FAILSAFE_METHOD_ == FAILSAFE_THROTTLE )
             
-                // older method not used anymore 
+                // Todo :
+                // older method not used anymore ?
                 /*
                 // Load failsafe values on all channels
                 for( uint8_t i = 0; i < PPM_ARRAY_MAX; i++ )
@@ -842,18 +840,19 @@ ISR( WDT_vect ) // If watchdog is triggered then enable Watchdog triggered flag 
         // LED control
         //----------------------------
 
-        #if defined (__AVR_ATmega16U2__) || defined (__AVR_ATmega32U2__)        
-        // Turn on RX led if we are not in PPM redundancy mode
-        if( input_mode != PPM_REDUNDANCY_MODE )
-        {
-            PORTD &= ~( 1<< PD4 );
-        }
-        else // if we are in PPM redundancy mode turn on both RX and TX LED to signal missing PPM on both inputs
-        {
-            PORTD &= ~( 1<< PD4 );
-            PORTD &= ~( 1<< PD5 );
-            PORTC &= ~( 1<< PC7 ); // Switch green LED ON (necessary if it was blinking)
-        }
+        #if defined (__AVR_ATmega16U2__) || defined (__AVR_ATmega32U2__)
+        
+            // Turn on RX led if we are not in PPM redundancy mode
+            if( input_mode != PPM_REDUNDANCY_MODE )
+            {
+                PORTD &= ~( 1<< PD4 );
+            }
+            else // if we are in PPM redundancy mode turn on both RX and TX LED to signal missing PPM on both inputs
+            {
+                PORTD &= ~( 1<< PD4 );
+                PORTD &= ~( 1<< PD5 );
+                PORTC &= ~( 1<< PC7 ); // Switch green LED ON (necessary if it was blinking)
+            }
         #endif
         
         // Reset management variables
@@ -876,10 +875,11 @@ ISR( SERVO_INT_VECTOR )
     // We sacrifice some memory but save instructions by working with ppm index count (18) instead of input channel count (8)
     
     #if defined (__AVR_ATmega16U2__) || defined (__AVR_ATmega32U2__)
-    // Toggle LED delay
-    static uint8_t led_RX_delay = 0;
-    static uint8_t led_TX_delay = 0;
-    static uint8_t led_redundancy_delay = 0;
+    
+        // Toggle LED delay
+        static uint8_t led_RX_delay = 0;
+        static uint8_t led_TX_delay = 0;
+        static uint8_t led_redundancy_delay = 0;
     #endif
     
     // Servo input pin storage 
@@ -887,12 +887,10 @@ ISR( SERVO_INT_VECTOR )
     
     // Used to store current servo input pins
     uint8_t servo_pins;
-    
     uint8_t servo_change;
     uint8_t servo_pin;
     uint8_t ppm_channel;
-	
-	  
+
     // Read current servo pulse change time
     uint16_t servo_time = SERVO_TIMER_CNT;
 	
@@ -909,7 +907,8 @@ ISR( SERVO_INT_VECTOR )
             // Stop PPM generator
             ppm_stop();
         }
-        
+        // PPM Output driver (direct control ) :
+        //-----------------------------------------------
         // PPM (channel 1) input pin is high
         if( SERVO_INPUT & 1 ) 
         {
@@ -922,11 +921,11 @@ ISR( SERVO_INT_VECTOR )
             // Set PPM output pin low
             PPM_PORT &= ~(1 << PPM_OUTPUT_PIN);
         }
-
+        //-----------------------------------------------
         // Reset Watchdog Timer
         wdt_reset(); 
 
-        // Reset watchdog trigerred flag to indicate that we have received servo input signals
+        // Reset watchdog trigerred flag to indicate that we have received a ppm input signal
         watchdog_triggered = false;
 
         #if defined (__AVR_ATmega16U2__) || defined (__AVR_ATmega32U2__)
@@ -1187,9 +1186,9 @@ ISR( SERVO_INT_VECTOR )
         // PPM switchover_delay_2_to_1 counter
         static uint8_t switchover_delay_2_to_1 = 0;
         
-        // ------------------------------------------------------
-		// PPM redundancy mode - input analyzis
-		// ------------------------------------------------------
+        // ----------------------------------------------
+		// PPM redundancy mode - inputs states analyzis
+		// ----------------------------------------------
 
         // Store current ppm inputs pins states
 		servo_pins = SERVO_INPUT;
@@ -1235,44 +1234,47 @@ ISR( SERVO_INT_VECTOR )
         
         if ( watchdog_triggered == true )
         {
-            reset_vars( PPM_CH1 ); // reset variables and flags for PPM1
-            reset_vars( PPM_CH2 ); // reset variables and flags for PPM2
+            reset_vars( PPM_CH1 ); // reset variables and flags for PPM1 input
+            reset_vars( PPM_CH2 ); // reset variables and flags for PPM2 input
             ppm2_switchover = false; // reset switchover flag
             // Reset watchdog_triggered flag false to indicate that we have received at least one ppm front
             switchover_delay_2_to_1 = 0;
             watchdog_triggered = false;
         }
+        // some macros for easier reading
+        
+        #define CHANNEL_WIDTH   ppm_var[ppm_input].ppm_channel_width[ppm_var[ppm_input].ppm_channel]
+        #define PREPULSE_WIDTH  ppm_var[ppm_input].ppm_prepulse_width
         
         // ------------------------------------------------------
 		// PPM redundancy mode - Polarity detector function
 		// ------------------------------------------------------
-        
         inline void polarity_detection( uint8_t ppm_input )
 		{
             if ( ppm_flag[ppm_input].ppm_polarity_detection_started == false ) // If polarity detection is not yet started
             {
-                ppm_flag[ppm_input].ppm_sync_error = true;	         // Set sync error flag to signal that PPM output is not reliable
-                ppm_flag[ppm_input].ppm_polarity_detection_started = true; // Set polarity detection started flag
-                ppm_var[ppm_input].ppm_polarity_detection_counter = 0;     // Reset polarity detection counter
+                ppm_flag[ppm_input].ppm_sync_error = true;	                // Set sync error flag to signal that PPM output is not reliable
+                ppm_flag[ppm_input].ppm_polarity_detection_started = true;  // Set polarity detection started flag
+                ppm_var[ppm_input].ppm_polarity_detection_counter = 0;      // Reset polarity detection counter
             }
             else // Polarity detection is started
             {
                 // Do we have a valid prepulse length ?
-                if( ( ppm_var[ppm_input].ppm_prepulse_width > ppm_defn[ppm_input].ppm_prepulse_min ) && ( ppm_var[ppm_input].ppm_prepulse_width < ppm_defn[ppm_input].ppm_prepulse_max ) )
+                if( ( PREPULSE_WIDTH > ppm_defn[ppm_input].ppm_prepulse_min ) && ( PREPULSE_WIDTH < ppm_defn[ppm_input].ppm_prepulse_max ) )
                 { // We have a valid prepulse
                     
                     ppm_var[ppm_input].ppm_polarity_detection_counter++; // Increment polarity detection counter
                     
                     if ( ppm_var[ppm_input].ppm_polarity_detection_counter >= POLARITY_DETECTION_THRESHOLD ) // Check polarity detection counter
                     { // If counter is >= THRESHOLD
-                        ppm_flag[ppm_input].ppm_polarity_detected = true; // Set polarity detected flag
+                        ppm_flag[ppm_input].ppm_polarity_detected = true;           // Set polarity detected flag
                         ppm_flag[ppm_input].ppm_polarity_detection_started = false; // Reset polarity detection started flag
                     }
                 }
                 else // We do not have a valid prepulse
                 {
-                    ppm_var[ppm_input].ppm_polarity_detection_counter = 0;     // Reset polarity detection counter
-                    ppm_flag[ppm_input].ppm_polarity ^= true; // Reverse ppm polarity
+                    ppm_var[ppm_input].ppm_polarity_detection_counter = 0; // Reset polarity detection counter
+                    ppm_flag[ppm_input].ppm_polarity ^= true;              // Reverse ppm polarity
                 }
             }
             
@@ -1286,17 +1288,17 @@ ISR( SERVO_INT_VECTOR )
 		{
             if ( ppm_flag[ppm_input].ppm_count_detection_started == false) // If count detection is not started
             {
-                ppm_flag[ppm_input].ppm_sync_error = true;	         // Set sync error flag to signal that PPM output is not reliable
+                ppm_flag[ppm_input].ppm_sync_error = true;	          // Set sync error flag to signal that PPM output is not reliable
                 if ( ppm_flag[ppm_input].ppm_channel_error == false ) // If we have a valid channel
                 {
                     if ( ppm_var[ppm_input].ppm_channel == 1 ) // If PPM channel is 1 (we are at the pulse end of first channel)
                     {
-                        ppm_var[ppm_input].ppm_channel_count_detection_counter = 0;     // Reset detection counter
-                        ppm_flag[ppm_input].ppm_count_detection_started = true; // Set count detection started flag
-                        ppm_var[ppm_input].ppm_channel_count = 1;            // Set channel count to 1. This counter is used to increment and store the channel count value
-                        ppm_var[ppm_input].ppm_previous_channel_count = 255; // Set ppm_previous_channel_count to 255 for first iteration inhibit
+                        ppm_var[ppm_input].ppm_channel_count_detection_counter = 0; // Reset detection counter
+                        ppm_flag[ppm_input].ppm_count_detection_started = true;     // Set count detection started flag
+                        ppm_var[ppm_input].ppm_channel_count = 1;                   // Set channel count to 1. This counter is used to increment and store the channel count value
+                        ppm_var[ppm_input].ppm_previous_channel_count = 255;        // Set ppm_previous_channel_count to 255 for first iteration inhibit
                         
-                        ppm_var[ppm_input].ppm_channel++;                    // Increment PPM channel
+                        ppm_var[ppm_input].ppm_channel++;                           // Increment PPM channel
                         return;
                     }
                 }
@@ -1305,17 +1307,17 @@ ISR( SERVO_INT_VECTOR )
             {
                 if ( ppm_flag[ppm_input].ppm_channel_error == false ) // If we have a valid channel
                 {
-                    ppm_var[ppm_input].ppm_channel_count = ppm_var[ppm_input].ppm_channel; // Make ppm channel count and ppm channel identical
+                    ppm_var[ppm_input].ppm_channel_count = ppm_var[ppm_input].ppm_channel;              // Make ppm channel count and ppm channel identical
                     if ( ppm_var[ppm_input].ppm_channel_count <= ppm_defn[ppm_input].ppm_max_channels ) // If ppm channel count <= MAX_CHANNELS
                     {
                         ppm_var[ppm_input].ppm_channel++; // Increment ppm channel
-                        return; // Bypass variables reset
+                        return;                           // Bypass variables reset
                     }
                 }
                 else // We do not have a valid channel
                 {
                     // Check for a valid sync symbol
-                    if( ( ppm_var[ppm_input].ppm_channel_width[ppm_var[ppm_input].ppm_channel] > ppm_defn[ppm_input].ppm_sync_length_min ) && ( ppm_var[ppm_input].ppm_channel_width[ppm_var[ppm_input].ppm_channel] < ppm_defn[ppm_input].ppm_sync_length_max ) )
+                    if( ( CHANNEL_WIDTH > ppm_defn[ppm_input].ppm_sync_length_min ) && ( CHANNEL_WIDTH < ppm_defn[ppm_input].ppm_sync_length_max ) )
                     {   // We have a valid sync symbol
                         if ( ppm_var[ppm_input].ppm_channel_count >= ppm_defn[ppm_input].ppm_min_channels ) // If ppm channel count >= MIN CHANNELS
                         {
@@ -1342,12 +1344,12 @@ ISR( SERVO_INT_VECTOR )
                                         }
                                     }
                                     return; // Channel count is not yet validated - bypass variables reset
-                                } // Else channel count did change, detection is wrong : reset detector variables and let the main the decoder resync.
+                                }           // Else channel count did change, detection is wrong : reset detector variables and let the main the decoder resync.
                             }
                             else // We do not yet have a previous channel count value to compare with
                             {
                                 ppm_var[ppm_input].ppm_previous_channel_count = ppm_var[ppm_input].ppm_channel_count; // store ppm channel count inside ppm previous channel count
-                                return;  // Bypass variables reset
+                                return;                                                                               // Bypass variables reset
                             }
                         }
                     }
@@ -1367,7 +1369,7 @@ ISR( SERVO_INT_VECTOR )
         {
             if( ppm_var[ppm_input].ppm_dead_detector_previous_channel == ppm_var[ppm_input].ppm_channel ) // if current channel did not change
             {
-                ppm_var[ppm_input].ppm_dead_counter++; // Increment channel dead counter
+                ppm_var[ppm_input].ppm_dead_counter++;                       // Increment channel dead counter
                 if( ppm_var[ppm_input].ppm_dead_counter > MISSING_CHANNELS ) // If other channel dead counter rise over detection threshold then reset ppm input and declare it invalid.
                 {
                     ppm_flag[ppm_input].ppm_valid = false;
@@ -1405,27 +1407,27 @@ ISR( SERVO_INT_VECTOR )
 
         inline void ppm_decoder ( uint8_t ppm_input ) 
         {
-            #define CHANNEL_WIDTH   ppm_var[ppm_input].ppm_channel_width[ppm_var[ppm_input].ppm_channel] //todo : place this macro in the code
             if ( !!( servo_pins & ( 1 << ppm_defn[ppm_input].ppm_pin ) ) ^ ppm_flag[ppm_input].ppm_polarity ) // Check if we've got a high level
-                                                                                                              // PPM polarity is reversed here if needed to keep the same decoding code
+            //----------------------------------------------------------------------------------------------------------------------------------
+                      // PPM polarity is reversed here if needed to keep the same decoding code
                       // This is a raising edge for negative ppm polarity : ___|¯¯¯
                       // Logically this is a channel end, a prepulse end and a channel start
                       // Or a frame sync symbol end (channel 0), a prepulse end and a channel 1 start
             {
-                ppm_var[ppm_input].ppm_prepulse_width = servo_time - ppm_var[ppm_input].ppm_prepulse_start; // Calculate prepulse length
+                PREPULSE_WIDTH = servo_time - ppm_var[ppm_input].ppm_prepulse_start; // Calculate prepulse length
                 
                 if ( ppm_flag[ppm_input].ppm_polarity_detected == true ) // Ckeck for polarity detected flag
                 {
                     // Do we have a valid prepulse length ?
-                    if( ( ppm_var[ppm_input].ppm_prepulse_width > ppm_defn[ppm_input].ppm_prepulse_min ) && ( ppm_var[ppm_input].ppm_prepulse_width < ppm_defn[ppm_input].ppm_prepulse_max ) )
+                    if( ( PREPULSE_WIDTH > ppm_defn[ppm_input].ppm_prepulse_min ) && ( PREPULSE_WIDTH < ppm_defn[ppm_input].ppm_prepulse_max ) )
                     {
                         // Calculate channel length
-                        ppm_var[ppm_input].ppm_channel_width[ppm_var[ppm_input].ppm_channel] = servo_time - ppm_var[ppm_input].ppm_start[ppm_var[ppm_input].ppm_channel];
+                        CHANNEL_WIDTH = servo_time - ppm_var[ppm_input].ppm_start[ppm_var[ppm_input].ppm_channel];
                         
                         if( ppm_flag[ppm_input].ppm_sync == true ) // If sync flag is set, we are synchronized - watch for channel length
                         {
                             // Check channel length validity
-                            if( ( ppm_var[ppm_input].ppm_channel_width[ppm_var[ppm_input].ppm_channel] < ppm_defn[ppm_input].ppm_channel_value_max ) && ( ppm_var[ppm_input].ppm_channel_width[ppm_var[ppm_input].ppm_channel] > ppm_defn[ppm_input].ppm_channel_value_min ) )
+                            if( ( CHANNEL_WIDTH < ppm_defn[ppm_input].ppm_channel_value_max ) && ( CHANNEL_WIDTH > ppm_defn[ppm_input].ppm_channel_value_min ) )
                             // If we have a valid pulse length
                             {
                                 ppm_flag[ppm_input].ppm_channel_error = false; // Reset channel error flag
@@ -1458,7 +1460,7 @@ ISR( SERVO_INT_VECTOR )
                         else // Sync flag is not set, we are not yet synchronized
                         {
                             // Check for frame sync symbol length
-                            if( ( ppm_var[ppm_input].ppm_channel_width[ppm_var[ppm_input].ppm_channel] > ppm_defn[ppm_input].ppm_sync_length_min ) && ( ppm_var[ppm_input].ppm_channel_width[ppm_var[ppm_input].ppm_channel] < ppm_defn[ppm_input].ppm_sync_length_max ) )
+                            if( ( CHANNEL_WIDTH > ppm_defn[ppm_input].ppm_sync_length_min ) && ( CHANNEL_WIDTH < ppm_defn[ppm_input].ppm_sync_length_max ) )
                             {
                                 // We have a valid sync symbol
                                 ppm_flag[ppm_input].ppm_sync_error = false;   // Reset sync error flag
@@ -1493,7 +1495,7 @@ ISR( SERVO_INT_VECTOR )
                 }
                 ppm_var[ppm_input].ppm_start[ppm_var[ppm_input].ppm_channel] = servo_time; // Store pulse start time for PPM input
             }
-            // -------------------------------------------------------------------------------------------
+            // --------------------------------------------------------------------------------------------------------------------
             else // We've got a low level (falling edge, channel end or frame sync symbol end)
             {
                 // Store prepulse start time
@@ -1549,7 +1551,8 @@ ISR( SERVO_INT_VECTOR )
                 }
             }
         }
-        // Run PPM decoder and auxiliary tasks
+        // We have now some time to relax, start the PPM decoder and auxiliary tasks
+        
         if ( ( servo_change & ( 1 << ppm_defn[PPM_CH1].ppm_pin ) ) && ( servo_change & ( 1 << ppm_defn[PPM_CH2].ppm_pin ) ) ) // Check if we have a pin change on both PPM inputs
         {
             ppm_decoder ( PPM_CH1 );   // run decoder function for each PPM input
@@ -1603,7 +1606,7 @@ ISR( SERVO_INT_VECTOR )
                 ppm_flag[ppm_input].ppm_valid = false;
             }
         }
-        check_ppm_validity ( PPM_CH1 );
+        check_ppm_validity ( PPM_CH1 ); // Run PPM validitity test for each input.
         check_ppm_validity ( PPM_CH2 );
 
         // ------------------------
@@ -1616,7 +1619,7 @@ ISR( SERVO_INT_VECTOR )
             #if ( PPM_SWITCHOVER_CHANNEL != 0 ) // Enable switchover forcing only if switchover function enabled
             
                 // check for PPM2 forcing (through PPM1 force channel)
-                #if ( PPM_SWITCHOVER_CHANNEL == AUTODETECTED_LAST_PPM1_CHANNEL )
+                #if ( PPM_SWITCHOVER_CHANNEL == AUTODETECTED_LAST_PPM1_CHANNEL ) // Use the correct method (auto detection or manually set switchover channel)
                     if ( ppm_var[PPM_CH1].ppm_channel_width[ppm2_switchover_force_channel] > PPM1_SWITCHOVER_FORCE_VAL_MIN ) // If forcing is valid
                 #else
                     if ( ppm_var[PPM_CH1].ppm_channel_width[PPM_SWITCHOVER_CHANNEL] > PPM1_SWITCHOVER_FORCE_VAL_MIN ) // If forcing is valid
