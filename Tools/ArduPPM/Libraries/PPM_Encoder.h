@@ -1,17 +1,17 @@
 // -------------------------------------------------------------
-// PPM ENCODER V3.0.1 Beta 3 (17-11-2013)
+// PPM ENCODER V3.0.1 Beta 3 (18-11-2013)
 // -------------------------------------------------------------
 // Improved servo to ppm for ArduPilot MEGA v1.x (ATmega328p),
 // PhoneDrone and APM2.x (ATmega32u2)
 
-// By: John Arne Birkeland - 2012
+// By: John Arne Birkeland - 2012 : PWM servo mode
+//                                  PPM passthrough mode
 // By: Olivier ADLER : PPM redundancy mode - 2013
-//                     APM v1.x adaptation
 //                     Tests - 2012 - 2013
 // 
 
     // Todo PPM redundancy mode
-    // Check the polarity of the generator, and reverse it if needed to follow the channel 1 polarity.    
+    // In the validation checker do not allow validation before two valid frames.
     // Reverse ppm output polarity when PPM2 input is selected (need support from APM code)
     // The goal is that the APM can detect witch receiver input is active and log it
         
@@ -336,7 +336,7 @@ volatile uint8_t input_mode = JUMPER_SELECT_MODE;
 // PPM OUTPUT SETTINGS
 // -------------------------------------------------------------
 
-// #define _POSITIVE_PPM_FRAME_    // Switch to positive pulse PPM
+//#define _POSITIVE_PPM_FRAME_    // Switch to positive pulse PPM
 // (the actual timing is encoded in the length of the low between two pulses)
 // Output PPM channels
 #define PPM_CHANNELS        8
@@ -574,7 +574,8 @@ volatile uint8_t disconnected_channels;
 #define PPM_OUTPUT_PIN        PC6
 #define PPM_INT_VECTOR        TIMER1_COMPA_vect
 #define PPM_COMPARE           OCR1A
-#define PPM_COMPARE_FLAG      COM1A0
+#define PPM_COMPARE_MODE_BIT_0      COM1A0
+#define PPM_COMPARE_MODE_BIT_1      COM1A1
 #define PPM_COMPARE_ENABLE    OCIE1A
 #define PPM_COMPARE_FORCE_MATCH    FOC1A
 
@@ -638,7 +639,8 @@ void EVENT_USB_Device_Disconnect(void)
 #define PPM_OUTPUT_PIN        PB2
 #define PPM_INT_VECTOR        TIMER1_COMPB_vect
 #define PPM_COMPARE           OCR1B
-#define PPM_COMPARE_FLAG      COM1B0
+#define PPM_COMPARE_MODE_BIT_0      COM1B0
+#define PPM_COMPARE_MODE_BIT_1      COM1B1
 #define PPM_COMPARE_ENABLE    OCIE1B
 #define PPM_COMPARE_FORCE_MATCH    FOC1B
 
@@ -662,6 +664,9 @@ volatile bool ppm_generator_active = false;
 // Used to indicate a brownout restart
 volatile bool brownout_reset = false;
 
+// Current active ppm channel
+volatile uint8_t ppm_out_channel = PPM_ARRAY_MAX - 1;
+
 #ifdef _THROTTLE_LOW_FAILSAFE_INDICATION
 // Used to force throttle fail-safe mode (RTL)
 volatile bool throttle_failsafe_force = false;
@@ -674,33 +679,46 @@ void ppm_start( void )
 {
         // Prevent enabling an already active PPM generator
         if( ppm_generator_active ) return;
-        
+
         // Store interrupt status and register flags
         volatile uint8_t SREG_tmp = SREG;
 
         // Stop interrupts
         cli();
 
-        // Make sure initial output state is low
-        // PPM_PORT &= ~(1 << PPM_OUTPUT_PIN); // Does not have any influence. Only PPM_COMPARE_FORCE_MATCH can change the generator polarity
-        
-        // Wait for output pin to settle
-        //_delay_us(2);
-
         // Set initial compare toggle to maximum (32ms) to give other parts of the system time to start
         SERVO_TIMER_CNT = 0;
         PPM_COMPARE = 0xFFFF;
 
-        // Set toggle on compare output
-        TCCR1A = (1 << PPM_COMPARE_FLAG);
+        if( input_mode != SERVO_PWM_MODE ) // If we are in redundancy or passthrough mode
+                                           // we need to force PPM output pin to the right state
+        {                                  // before starting the PPM generator
+            TCCR1B = 0; // Stop timer 1
+            
+            #if defined (_POSITIVE_PPM_FRAME_) // Select the compare output mode
+                TCCR1A = ( 1 << PPM_COMPARE_MODE_BIT_1 ); // // Set compare output mode to "clear on compare match"
+            #else
+                TCCR1A = ( ( 1 << PPM_COMPARE_MODE_BIT_1 ) | ( 1 << PPM_COMPARE_MODE_BIT_0 ) ); // Set compare output mode to "set on compare match"
+            #endif
+            
+            TCCR1C |= (1 << PPM_COMPARE_FORCE_MATCH); // Issue a force compare match to set the PPM output pin state
+            
+            // Reset ppm generator current channel to start generation on a frame sync symbol
+            ppm_out_channel = PPM_ARRAY_MAX - 1;
+        }
+        else // We are in PWM servo mode
+        {
+            #if defined (_POSITIVE_PPM_FRAME_)
+                // Force output compare to reverse polarity
+                TCCR1C |= (1 << PPM_COMPARE_FORCE_MATCH); // Todo : works only for the first ppm generator start
+            #endif
+        }
 
-        // Set TIMER1 8x prescaler
+        // Set compare output mode to "toggle on compare"
+        TCCR1A = (1 << PPM_COMPARE_MODE_BIT_0);
+
+        // Start TIMER1 with 8x prescaler
         TCCR1B = ( 1 << CS11 );
-        
-        #if defined (_POSITIVE_PPM_FRAME_)
-        // Force output compare to reverse polarity
-        TCCR1C |= (1 << PPM_COMPARE_FORCE_MATCH);
-        #endif
 
         // Enable output compare interrupt
         TIMSK1 |= (1 << PPM_COMPARE_ENABLE);
@@ -1387,7 +1405,7 @@ ISR( SERVO_INT_VECTOR )
 
         inline void ppm_decoder ( uint8_t ppm_input ) 
         {
-            #define CHANNEL_WIDTH   ppm_var[ppm_input].ppm_channel_width[ppm_var[ppm_input].ppm_channel] //todo
+            #define CHANNEL_WIDTH   ppm_var[ppm_input].ppm_channel_width[ppm_var[ppm_input].ppm_channel] //todo : place this macro in the code
             if ( !!( servo_pins & ( 1 << ppm_defn[ppm_input].ppm_pin ) ) ^ ppm_flag[ppm_input].ppm_polarity ) // Check if we've got a high level
                                                                                                               // PPM polarity is reversed here if needed to keep the same decoding code
                       // This is a raising edge for negative ppm polarity : ___|¯¯¯
@@ -1488,6 +1506,12 @@ ISR( SERVO_INT_VECTOR )
         // --------------------------------------------------------------------------------------------------------------------------------
 
         // PPM Output is drived first for the lowest jitter
+        
+        #ifdef _POSITIVE_PPM_FRAME_
+            #define INVERT_PPM_OUTPUT   1
+        #else
+            #define INVERT_PPM_OUTPUT   0
+        #endif
 
         if ( ppm2_switchover == false ) // PPM1 is selected
         {
@@ -1495,8 +1519,8 @@ ISR( SERVO_INT_VECTOR )
             {
                 if( servo_change & ( 1 << ppm_defn[PPM_CH1].ppm_pin ) ) // Check if we have a pin change on PPM1 input
                 {
-                    // Check if we've got a high level on PPM1 (reverse polarity according to detected polarity)
-                    if ( !!( servo_pins & ( 1 << ppm_defn[PPM_CH1].ppm_pin ) ) ^ ppm_flag[PPM_CH1].ppm_polarity )
+                    // Check if we've got a high level on PPM1 (reverse polarity according to detected polarity and PPM output setup)
+                    if ( !!( servo_pins & ( 1 << ppm_defn[PPM_CH1].ppm_pin ) ) ^ ppm_flag[PPM_CH1].ppm_polarity ^ INVERT_PPM_OUTPUT )
                     {
                         PPM_PORT |= (1 << PPM_OUTPUT_PIN); // Set PPM output pin high
                     }
@@ -1513,8 +1537,8 @@ ISR( SERVO_INT_VECTOR )
             {
                 if( servo_change & ( 1 << ppm_defn[PPM_CH2].ppm_pin ) ) // Check if we have a pin change on PPM2 input
                 {
-                    // Check if we've got a high level on PPM2 (reverse polarity according to detected polarity)
-                    if ( !!( servo_pins & ( 1 << ppm_defn[PPM_CH2].ppm_pin ) ) ^ ppm_flag[PPM_CH2].ppm_polarity )
+                    // Check if we've got a high level on PPM2 (reverse polarity according to detected polarity and PPM output setup)
+                    if ( !!( servo_pins & ( 1 << ppm_defn[PPM_CH2].ppm_pin ) ) ^ ppm_flag[PPM_CH2].ppm_polarity ^ INVERT_PPM_OUTPUT )
                     {
                         PPM_PORT |= (1 << PPM_OUTPUT_PIN); // Set PPM output pin high
                     }
@@ -1745,8 +1769,6 @@ ISR( SERVO_INT_VECTOR )
 // PPM OUTPUT - TIMER1 COMPARE INTERRUPT
 // ------------------------------------------------------------------------------
 
-// Current active ppm channel
-volatile uint8_t ppm_out_channel = PPM_ARRAY_MAX - 1;
 // TX Led Delay
 //volatile uint8_t led_delay2 = 0;
 
@@ -2059,6 +2081,9 @@ void ppm_encoder_init( void )
     
     // Set PPM pin to output
     PPM_DDR |= (1 << PPM_OUTPUT_PIN);
+    
+    // Enable output compare interrupt
+    // TIMSK1 |= (1 << PPM_COMPARE_ENABLE);
 
     // ------------------------------------------------------------------------------
     // Enable watchdog interrupt mode
