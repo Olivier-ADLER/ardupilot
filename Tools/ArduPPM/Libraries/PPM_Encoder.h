@@ -1362,32 +1362,56 @@ ISR( SERVO_INT_VECTOR )
            
 		} // End : channel_count_detection function
         
+        // ------------------------------
+        // PPM validity checker function
+        // ------------------------------
+        inline void check_ppm_validity( uint8_t ppm_input )
+        {
+            // Check PPM validity
+            if ( ppm_flag[ppm_input].ppm_sync_error == false && ppm_flag[ppm_input].ppm_channel_error == false && ppm_flag[ppm_input].ppm_frame_completed == true )
+            { // PPM is valid
+                // Set channel validity flag
+                ppm_flag[ppm_input].ppm_valid = true;
+                // At least one input is valid so we need to stop the ppm generator because one of them will be pushed to the PPM output
+                if ( ppm_generator_active ) ppm_stop();
+            }
+            else if ( ppm_flag[ppm_input].ppm_sync_error == true || ppm_flag[ppm_input].ppm_channel_error == true ) // PPM is not valid
+            {
+                // Reset channel validity flag
+                ppm_flag[ppm_input].ppm_valid = false;
+            }
+        } // End : Validity checker function
+        
         // ------------------------------------------------------
 		// PPM redundancy mode - Dead input detector
 		// ------------------------------------------------------
         inline void dead_input_detector ( uint8_t ppm_input )
         {
-            if( ppm_var[ppm_input].ppm_dead_detector_previous_channel == ppm_var[ppm_input].ppm_channel ) // if current channel did not change
+            if ( ppm_flag[!ppm_input].ppm_valid == true ) // run dead input detector if input marked as valid
             {
-                ppm_var[ppm_input].ppm_dead_counter++;                       // Increment channel dead counter
-                if( ppm_var[ppm_input].ppm_dead_counter > MISSING_CHANNELS ) // If other channel dead counter rise over detection threshold then reset ppm input and declare it invalid.
+                if( ppm_var[ppm_input].ppm_dead_detector_previous_channel == ppm_var[ppm_input].ppm_channel ) // if current channel did not change
                 {
-                    ppm_flag[ppm_input].ppm_valid = false;
-                    ppm_flag[ppm_input].ppm_sync_error = true;
-                    ppm_flag[ppm_input].ppm_sync = false;
-                    ppm_flag[ppm_input].ppm_channel_error = true;
-                    ppm_flag[ppm_input].ppm_frame_completed = false;
-                    
-                    ppm_var[ppm_input].ppm_channel = 0;
-                    ppm_var[ppm_input].ppm_dead_counter = 0;
-                    ppm_var[ppm_input].ppm_dead_detector_previous_channel = 255;
+                    ppm_var[ppm_input].ppm_dead_counter++;                       // Increment channel dead counter
+                    if( ppm_var[ppm_input].ppm_dead_counter > MISSING_CHANNELS ) // If other channel dead counter rise over detection threshold then reset ppm input and declare it invalid.
+                    {
+                        ppm_flag[ppm_input].ppm_valid = false;
+                        ppm_flag[ppm_input].ppm_sync_error = true;
+                        ppm_flag[ppm_input].ppm_sync = false;
+                        ppm_flag[ppm_input].ppm_channel_error = true;
+                        ppm_flag[ppm_input].ppm_frame_completed = false;
+                        
+                        ppm_var[ppm_input].ppm_channel = 0;
+                        ppm_var[ppm_input].ppm_dead_counter = 0;
+                        ppm_var[ppm_input].ppm_dead_detector_previous_channel = 255;
+                    }
                 }
+                else // if channel index is changing then reset dead counter
+                {
+                    ppm_var[ppm_input].ppm_dead_counter  = 0;
+                }
+                ppm_var[ppm_input].ppm_dead_detector_previous_channel = ppm_var[ppm_input].ppm_channel; // Store previous channel index
             }
-            else // if channel index is changing then reset dead counter
-            {
-                ppm_var[ppm_input].ppm_dead_counter  = 0;
-            }
-            ppm_var[ppm_input].ppm_dead_detector_previous_channel = ppm_var[ppm_input].ppm_channel; // Store previous channel index
+            check_ppm_validity ( ! ppm_input ); // Run validity checker on other input
         } // End : Dead input detector
         
         //-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -1494,6 +1518,8 @@ ISR( SERVO_INT_VECTOR )
                      polarity_detection(ppm_input); // Run polarity detector
                 }
                 ppm_var[ppm_input].ppm_start[ppm_var[ppm_input].ppm_channel] = servo_time; // Store pulse start time for PPM input
+               
+                dead_input_detector (!ppm_input); // run dead input detector function against other input
             }
             // --------------------------------------------------------------------------------------------------------------------
             else // We've got a low level (falling edge, channel end or frame sync symbol end)
@@ -1555,63 +1581,27 @@ ISR( SERVO_INT_VECTOR )
         
         if ( ( servo_change & ( 1 << ppm_defn[PPM_CH1].ppm_pin ) ) && ( servo_change & ( 1 << ppm_defn[PPM_CH2].ppm_pin ) ) ) // Check if we have a pin change on both PPM inputs
         {
-            ppm_decoder ( PPM_CH1 );   // run decoder function for each PPM input
-            ppm_decoder ( PPM_CH2 );
-            
             ppm_var[PPM_CH1].ppm_dead_counter = 0; // Reset dead input detector variables for PPM input 1
             ppm_var[PPM_CH1].ppm_dead_detector_previous_channel = 255;
             ppm_var[PPM_CH2].ppm_dead_counter = 0; // Reset dead input detector variables for PPM input 2
             ppm_var[PPM_CH2].ppm_dead_detector_previous_channel = 255;
+            
+            ppm_decoder ( PPM_CH1 );   // run decoder function for each PPM input
+            ppm_decoder ( PPM_CH2 );
         }
         else if ( servo_change & ( 1 << ppm_defn[PPM_CH1].ppm_pin ) ) // If we have only a change on input 1
         {
             ppm_decoder ( PPM_CH1 );   // run decoder function PPM1 input
-            
-            if ( ppm_flag[PPM_CH2].ppm_valid == true ) // run dead input detector if other input is marked as valid
-            {
-                dead_input_detector ( PPM_CH2 ); // run dead detector function for PPM2 input
-            }   
         }
         else // We have only a change on input 2
         {
             ppm_decoder ( PPM_CH2 );   // run decoder function PPM2 input
-            
-            if ( ppm_flag[PPM_CH1].ppm_valid == true ) // run dead input detector if other input is marked as valid
-            {
-                dead_input_detector ( PPM_CH1 ); // run dead detector function for PPM1 input
-            }   
         }
         // End : Task optimizer
 
 		// ------------------------------------------------------
-		// PPM redundancy mode - Post processing
+		// PPM redundancy mode - Switchover control
 		// ------------------------------------------------------
-        
-        // ------------------------
-        // PPM validity checker
-        // ------------------------
-        inline void check_ppm_validity( uint8_t ppm_input )
-        {
-            // Check PPM validity
-            if ( ppm_flag[ppm_input].ppm_sync_error == false && ppm_flag[ppm_input].ppm_channel_error == false && ppm_flag[ppm_input].ppm_frame_completed == true )
-            { // PPM is valid
-                // Set channel validity flag
-                ppm_flag[ppm_input].ppm_valid = true;
-                // At least one input is valid so we need to stop the ppm generator because one of them will be pushed to the PPM output
-                if ( ppm_generator_active ) ppm_stop();
-            }
-            else if ( ppm_flag[ppm_input].ppm_sync_error == true || ppm_flag[ppm_input].ppm_channel_error == true ) // PPM is not valid
-            {
-                // Reset channel validity flag
-                ppm_flag[ppm_input].ppm_valid = false;
-            }
-        }
-        check_ppm_validity ( PPM_CH1 ); // Run PPM validitity test for each input.
-        check_ppm_validity ( PPM_CH2 );
-
-        // ------------------------
-        // Switchover control
-        // ------------------------
         
 		// Check for PPM1 validity
 		if ( ppm_flag[PPM_CH1].ppm_valid == true ) // If PPM1 is valid
