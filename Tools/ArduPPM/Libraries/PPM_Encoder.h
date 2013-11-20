@@ -1,5 +1,5 @@
 // -------------------------------------------------------------
-// PPM ENCODER V3.0.1 Beta 3 (18-11-2013)
+// PPM ENCODER V3.0.1 Beta 4 (20-11-2013)
 // -------------------------------------------------------------
 // Improved servo to ppm for ArduPilot MEGA v1.x (ATmega328p),
 // PhoneDrone and APM2.x (ATmega32u2)
@@ -11,7 +11,6 @@
 // 
 
     // Todo PPM redundancy mode
-    // In the validation checker do not allow validation before two valid frames.
     // Reverse ppm output polarity when PPM2 input is selected (need support from APM code)
     // The goal is that the APM can detect witch receiver input is active and log it
         
@@ -397,7 +396,7 @@ volatile uint8_t input_mode = JUMPER_SELECT_MODE;
                                                 
 #define POLARITY_DETECTION_THRESHOLD        80  // Valid needed prepulses before polarity detection validation
 #define CHANNEL_COUNT_DETECTION_THRESHOLD	10  // Identical frames needed before channel count validation
-
+#define FRAME_COUNT_DETECTION_THRESHOLD     2   // Valid frames needed before declaring a PPM input valid
 
 // ----------------------------
 // PPM1 input : frame format
@@ -1145,6 +1144,8 @@ ISR( SERVO_INT_VECTOR )
 		uint8_t ppm_previous_channel_count;
 		// Channel counts detection : detection counter
 		uint8_t ppm_channel_count_detection_counter;
+        // Validitity checker counter
+        uint8_t ppm_validity_checker_counter;
         };
         static struct RM_variables_t ppm_var[2];
 
@@ -1172,10 +1173,14 @@ ISR( SERVO_INT_VECTOR )
             uint8_t ppm_count_detection_started    : 1; // Bit 8  = false
             // Channel count detected flag
             uint8_t ppm_channel_count_detected     : 1; // Bit 9  = false
+            // Validitity checker detection started flag
+            uint8_t ppm_validity_check_started     : 1; // Bit 10  = false
+            // Validitity checker branching flag
+            uint8_t ppm_validity_checker_branch   : 1; // Bit 11  = false
         };
         static struct RM_flags_t ppm_flag[2] = \
-        {{ false, true, true, false, false, false, false, false, false, false }, \
-        { false, true, true, false, false, false, false, false, false, false }};
+        {{ false, true, true, false, false, false, false, false, false, false, false, false }, \
+        { false, true, true, false, false, false, false, false, false, false, false, false }};
         
         // PPM2 switchover flag
         static uint8_t ppm2_switchover = false;
@@ -1212,12 +1217,15 @@ ISR( SERVO_INT_VECTOR )
             ppm_flag[ppm_input].ppm_channel_error = true;
             ppm_flag[ppm_input].ppm_frame_completed = false;
             ppm_flag[ppm_input].ppm_count_detection_started = false;
+            ppm_flag[ppm_input].ppm_validity_check_started = false;
+            ppm_flag[ppm_input].ppm_validity_checker_branch  = false;
             
             ppm_var[ppm_input].ppm_channel = 0;
             ppm_var[ppm_input].ppm_dead_detector_previous_channel = 255;
             ppm_var[ppm_input].ppm_dead_counter = 0;
             ppm_var[ppm_input].ppm_channel_count_detection_counter = 0;
             ppm_var[ppm_input].ppm_previous_channel_count = 255;
+            ppm_var[ppm_input].ppm_validity_checker_counter = 0;
             
             #ifdef RESTART_POLARITY_DETECTION_AFTER_WATCHDOG
             ppm_flag[ppm_input].ppm_polarity_detection_started = false;
@@ -1367,18 +1375,54 @@ ISR( SERVO_INT_VECTOR )
         // ------------------------------
         inline void check_ppm_validity( uint8_t ppm_input )
         {
-            // Check PPM validity
-            if ( ppm_flag[ppm_input].ppm_sync_error == false && ppm_flag[ppm_input].ppm_channel_error == false && ppm_flag[ppm_input].ppm_frame_completed == true )
+            if ( ppm_flag[ppm_input].ppm_sync_error == false && ppm_flag[ppm_input].ppm_channel_error == false ) // Check PPM validity
             { // PPM is valid
-                // Set channel validity flag
-                ppm_flag[ppm_input].ppm_valid = true;
-                // At least one input is valid so we need to stop the ppm generator because one of them will be pushed to the PPM output
-                if ( ppm_generator_active ) ppm_stop();
+                if ( ppm_flag[ppm_input].ppm_validity_check_started == false ) // If a validity check is not yet started
+                {
+                    if ( ppm_flag[ppm_input].ppm_frame_completed == true ) // If a frame has been completed
+                    {
+                        ppm_flag[ppm_input].ppm_validity_check_started = true;      // We can start a new validity check
+                        ppm_var[ppm_input].ppm_validity_checker_counter = 0;        // Reset validity checker counter
+                        ppm_flag[ppm_input].ppm_validity_checker_branch = false;    // Set branching for first validity test
+                    } // Else : return
+                }
+                else // A validity check was started
+                {
+                    if ( ppm_flag[ppm_input].ppm_validity_checker_branch == false ) // We need to check for sync symbol confirmation
+                    {
+                        if ( ppm_flag[ppm_input].ppm_frame_completed == false ) // This is indicating a valid new frame sync symbol
+                        {                                                       // We are sure now that the previous frame was valid
+                            ppm_var[ppm_input].ppm_validity_checker_counter++;  // Increment validity checker counter
+                            ppm_flag[ppm_input].ppm_validity_checker_branch = true; // We need now to check for a new completed frame
+                            
+                            if ( ppm_var[ppm_input].ppm_validity_checker_counter >= FRAME_COUNT_DETECTION_THRESHOLD ) // If we have enough good frames
+                            {
+                                //--------------------------------------------------------------------
+                                ppm_flag[ppm_input].ppm_valid = true; // Declare the ppm input valid
+                                //--------------------------------------------------------------------
+                                // At least one input is valid so we need to stop the ppm generator
+                                if ( ppm_generator_active ) ppm_stop();
+                            } // return
+                        }
+                        else // The frame was not valid (the sync symbol is not valid)
+                        {
+                            ppm_flag[ppm_input].ppm_valid = false; // Declare the ppm input invalid
+                            ppm_flag[ppm_input].ppm_validity_check_started = false;  // Restart the validity checker
+                        } // return
+                    }
+                    else // We need to check for a new completed frame
+                    {
+                        if ( ppm_flag[ppm_input].ppm_frame_completed == true ) // If a frame has been completed
+                        {
+                            ppm_flag[ppm_input].ppm_validity_checker_branch = false; // We need now to check for sync symbol confirmation
+                        } 
+                    } // return
+                }
             }
-            else if ( ppm_flag[ppm_input].ppm_sync_error == true || ppm_flag[ppm_input].ppm_channel_error == true ) // PPM is not valid
+            else // PPM input is not valid
             {
-                // Reset channel validity flag
-                ppm_flag[ppm_input].ppm_valid = false;
+                ppm_flag[ppm_input].ppm_valid = false; // Declare the ppm input invalid
+                ppm_flag[ppm_input].ppm_validity_check_started = false;  // Restart the validity checker
             }
         } // End : Validity checker function
         
