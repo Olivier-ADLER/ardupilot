@@ -1,5 +1,5 @@
 // -------------------------------------------------------------
-// PPM ENCODER V3.0.1 Beta 4 (20-11-2013)
+// PPM ENCODER V3.0.1 Beta 5 (24-11-2013)
 // -------------------------------------------------------------
 // Improved servo to ppm for ArduPilot MEGA v1.x (ATmega328p),
 // PhoneDrone and APM2.x (ATmega32u2)
@@ -13,9 +13,8 @@
     // Todo PPM redundancy mode
     // Reverse ppm output polarity when PPM2 input is selected (need support from APM code)
     // The goal is that the APM can detect witch receiver input is active and log it
-        
+            
     // Todo Servo mode
-    
     // Add compatibility with failsafe methods
     // #define FAILSAFE_MUTE  
     // #define FAILSAFE_THROTTLE
@@ -215,6 +214,7 @@
 //        - PPM encoder init : add code for PPM redundancy mode
 //        - arduino USB code : disabling LED control to allow PPM debugging with Mission Planner connected
 //        - Failsafe changes : see manual
+//        - Enhancements to clean the PPM output. (validity checker, enhanced switchover...)
 // FAILSAFE_MUTE        // Failsafe method muting ppm output ( mainly for use with other systems )
 // FAILSAFE_THROTTLE    // Legacy throtlle failsafe method using a low value (900 us) on the throttle channel
 // FAILSAFE_EXTRA_LOW   // Prefered method using extra low PWM values on missing channels
@@ -397,6 +397,7 @@ volatile uint8_t input_mode = JUMPER_SELECT_MODE;
 #define POLARITY_DETECTION_THRESHOLD        80  // Valid needed prepulses before polarity detection validation
 #define CHANNEL_COUNT_DETECTION_THRESHOLD	10  // Identical frames needed before channel count validation
 #define FRAME_COUNT_DETECTION_THRESHOLD     2   // Valid frames needed before declaring a PPM input valid
+#define INVALID_INPUTS_TIMEOUT              TICKS_FOR_ONE_US * 30000 // If both channels are invalid, timeout before starting the ppm generator with failsafe values
 
 // ----------------------------
 // PPM1 input : frame format
@@ -673,13 +674,25 @@ volatile uint8_t ppm_out_channel = PPM_ARRAY_MAX - 1;
 volatile bool throttle_failsafe_force = false;
 #endif
 
+// Used to indicate when at least one ppm input format has been confirmed
+volatile bool ppm_first_format_confirmed = false;
+
+// Used to ask for a ppm generator stop request in PPM redundancy mode
+volatile bool ppm_generator_stop_request = false;
+
 // ------------------------------------------------------------------------------
 // PPM GENERATOR START - "TOGGLE ON COMPARE" INTERRUPT ENABLING
 // ------------------------------------------------------------------------------
-void ppm_start( void )
+void ppm_generator_start( void )
 {
         // Prevent enabling an already active PPM generator
-        if( ppm_generator_active ) return;
+        if( ppm_generator_active == true ) return;
+        
+        // Prevent enabling the generator if at least one ppm input format is not yet confirmed
+        if( input_mode == PPM_REDUNDANCY_MODE )
+        {
+            if( ppm_first_format_confirmed == false ) return;
+        }
 
         // Store interrupt status and register flags
         volatile uint8_t SREG_tmp = SREG;
@@ -704,8 +717,8 @@ void ppm_start( void )
             
             TCCR1C |= (1 << PPM_COMPARE_FORCE_MATCH); // Issue a force compare match to set the PPM output pin state
             
-            // Reset ppm generator current channel to start generation on a frame sync symbol
-            ppm_out_channel = PPM_ARRAY_MAX - 1;
+            // Reset ppm generator current channel to begin generation with a frame sync symbol
+            ppm_out_channel = ( PPM_ARRAY_MAX - 1);
         }
         else // We are in PWM servo mode
         {
@@ -742,7 +755,7 @@ void ppm_start( void )
 // ------------------------------------------------------------------------------
 // PPM GENERATOR STOP - "TOGGLE ON COMPARE" INTERRUPT DISABLING
 // ------------------------------------------------------------------------------
-void ppm_stop( void )
+void ppm_generator_stop( void )
 {
         // Prevent stopping an already stopped PPM generator
         if( !ppm_generator_active ) return;
@@ -763,6 +776,13 @@ void ppm_stop( void )
         {
             TCCR1B = 0; // Stop timer 1
         }
+        
+        // force PPM output pin to standby level (high for negative PPM, low for positive PPM)
+        #ifdef _POSITIVE_PPM_FRAME_
+            PPM_PORT &= ~(1 << PPM_OUTPUT_PIN); // Set PPM output pin low
+        #else
+            PPM_PORT |= (1 << PPM_OUTPUT_PIN); // Set PPM output pin high
+        #endif
         
         // Indicate that PPM generator is not active
         ppm_generator_active = false;
@@ -792,7 +812,6 @@ ISR( WDT_vect ) // If watchdog is triggered then enable Watchdog triggered flag 
         // If we are in PWM SERVO mode, 
         if ( input_mode == SERVO_PWM_MODE )
         {
-                        
             #if ( _FAILSAFE_METHOD_ == FAILSAFE_THROTTLE )
             
                 // Todo :
@@ -812,11 +831,6 @@ ISR( WDT_vect ) // If watchdog is triggered then enable Watchdog triggered flag 
             
                 // Set Throttle extra Low & leave other channels at last value
                 ppm[5] = failsafe_ppm[ 5 ];
-            
-            #else // We are in FAILSAFE_MUTE mode
-            
-                ppm_stop(); // Stop PPM generator during receiver lost period
-            
             #endif
         }
         else // We are in PPM passthrough or PPM redundancy mode
@@ -829,11 +843,25 @@ ISR( WDT_vect ) // If watchdog is triggered then enable Watchdog triggered flag 
                     ppm[ i ] = failsafe_ppm[ i ];
                 }
                 // Start the ppm generator
-                ppm_start();
-                
+                ppm_generator_start();
             #endif
         }
-        
+        #if ( _FAILSAFE_METHOD_ == FAILSAFE_MUTE ) // We are in a failsafe mute method
+            
+            if( ppm_generator_active == true ) // If the ppm generator is active we need to stop it
+            {    
+                ppm_generator_stop(); // Stop the PPM generator during receiver lost period
+            }
+            else // Simply force PPM output pin to standby level
+            {
+                // force PPM output pin to standby level (high for negative PPM, low for positive PPM)
+                #ifdef _POSITIVE_PPM_FRAME_
+                    PPM_PORT &= ~(1 << PPM_OUTPUT_PIN); // Set PPM output pin low
+                #else
+                    PPM_PORT |= (1 << PPM_OUTPUT_PIN); // Set PPM output pin high
+                #endif
+            }
+        #endif
         
         //----------------------------
         // LED control
@@ -904,7 +932,7 @@ ISR( SERVO_INT_VECTOR )
         if( ppm_generator_active )
         {
             // Stop PPM generator
-            ppm_stop();
+            ppm_generator_stop();
         }
         // PPM Output driver (direct control ) :
         //-----------------------------------------------
@@ -1053,7 +1081,7 @@ ISR( SERVO_INT_VECTOR )
     CHECK_PINS_DONE:
 
         // Start PPM generator if not already running
-        if( !ppm_generator_active ) ppm_start();
+        if( !ppm_generator_active ) ppm_generator_start();
 
         #if defined (__AVR_ATmega16U2__) || defined (__AVR_ATmega32U2__)
        
@@ -1177,13 +1205,18 @@ ISR( SERVO_INT_VECTOR )
             uint8_t ppm_validity_check_started     : 1; // Bit 10  = false
             // Validitity checker branching flag
             uint8_t ppm_validity_checker_branch   : 1; // Bit 11  = false
+            // Switchover ppm live ready flag
+            uint8_t ppm_live_ready                : 1; // Bit 12  = false
         };
         static struct RM_flags_t ppm_flag[2] = \
-        {{ false, true, true, false, false, false, false, false, false, false, false, false }, \
-        { false, true, true, false, false, false, false, false, false, false, false, false }};
+        {{ false, true, true, false, false, false, false, false, false, false, false, false, false }, \
+        { false, true, true, false, false, false, false, false, false, false, false, false, false }};
         
         // PPM2 switchover flag
-        static uint8_t ppm2_switchover = false;
+        static bool ppm2_switchover = false;
+        
+        // PPM switchover invalid inputs detection started flag
+        static bool ppm_switchover_invalid_inputs_detection_started  = false;
         
         // PPM switchover force channel
         static uint8_t ppm2_switchover_force_channel = 0;
@@ -1191,6 +1224,10 @@ ISR( SERVO_INT_VECTOR )
         // PPM switchover_delay_2_to_1 counter
         static uint8_t switchover_delay_2_to_1 = 0;
         
+        // PPM switchover invalid inputs detection started flag
+        static uint16_t ppm_switchover_invalid_inputs_timestamp  = 0;
+
+
         // ----------------------------------------------
 		// PPM redundancy mode - inputs states analyzis
 		// ----------------------------------------------
@@ -1218,7 +1255,8 @@ ISR( SERVO_INT_VECTOR )
             ppm_flag[ppm_input].ppm_frame_completed = false;
             ppm_flag[ppm_input].ppm_count_detection_started = false;
             ppm_flag[ppm_input].ppm_validity_check_started = false;
-            ppm_flag[ppm_input].ppm_validity_checker_branch  = false;
+            ppm_flag[ppm_input].ppm_validity_checker_branch = false;
+            ppm_flag[ppm_input].ppm_live_ready = false;
             
             ppm_var[ppm_input].ppm_channel = 0;
             ppm_var[ppm_input].ppm_dead_detector_previous_channel = 255;
@@ -1245,9 +1283,14 @@ ISR( SERVO_INT_VECTOR )
             reset_vars( PPM_CH1 ); // reset variables and flags for PPM1 input
             reset_vars( PPM_CH2 ); // reset variables and flags for PPM2 input
             ppm2_switchover = false; // reset switchover flag
+            ppm_switchover_invalid_inputs_detection_started = false;
             // Reset watchdog_triggered flag false to indicate that we have received at least one ppm front
             switchover_delay_2_to_1 = 0;
+            #if defined ( RESTART_POLARITY_DETECTION_AFTER_WATCHDOG ) || defined ( RESTART_CHANNEL_COUNT_DETECTION_AFTER_WATCHDOG )
+                ppm_first_format_confirmed = false;
+            #endif
             watchdog_triggered = false;
+            ppm_generator_stop_request = false;
         }
         // some macros for easier reading
         
@@ -1400,8 +1443,10 @@ ISR( SERVO_INT_VECTOR )
                                 //--------------------------------------------------------------------
                                 ppm_flag[ppm_input].ppm_valid = true; // Declare the ppm input valid
                                 //--------------------------------------------------------------------
-                                // At least one input is valid so we need to stop the ppm generator
-                                if ( ppm_generator_active ) ppm_stop();
+                                if ( ppm_first_format_confirmed == false ) // If a first input format has not yet been confirmed
+                                {
+                                    if ( ppm_flag[ppm_input].ppm_channel_count_detected == true ) ppm_first_format_confirmed = true; // confirm that format has been detected and confirmed at least on one input
+                                }
                             } // return
                         }
                         else // The frame was not valid (the sync symbol is not valid)
@@ -1422,6 +1467,7 @@ ISR( SERVO_INT_VECTOR )
             else // PPM input is not valid
             {
                 ppm_flag[ppm_input].ppm_valid = false; // Declare the ppm input invalid
+                ppm_flag[ppm_input].ppm_live_ready = false; // Declare input not ready for live output
                 ppm_flag[ppm_input].ppm_validity_check_started = false;  // Restart the validity checker
             }
         } // End : Validity checker function
@@ -1439,6 +1485,7 @@ ISR( SERVO_INT_VECTOR )
                     if( ppm_var[ppm_input].ppm_dead_counter > MISSING_CHANNELS ) // If other channel dead counter rise over detection threshold then reset ppm input and declare it invalid.
                     {
                         ppm_flag[ppm_input].ppm_valid = false;
+                        ppm_flag[ppm_input].ppm_live_ready = false;
                         ppm_flag[ppm_input].ppm_sync_error = true;
                         ppm_flag[ppm_input].ppm_sync = false;
                         ppm_flag[ppm_input].ppm_channel_error = true;
@@ -1577,7 +1624,7 @@ ISR( SERVO_INT_VECTOR )
         // PPM redundancy mode - Task optimizer
         // --------------------------------------------------------------------------------------------------------------------------------
 
-        // PPM Output is drived first for the lowest jitter
+        // PPM Output is driven first for the lowest jitter
         
         #ifdef _POSITIVE_PPM_FRAME_
             #define INVERT_PPM_OUTPUT   1
@@ -1587,7 +1634,7 @@ ISR( SERVO_INT_VECTOR )
 
         if ( ppm2_switchover == false ) // PPM1 is selected
         {
-            if ( ppm_flag[PPM_CH1].ppm_valid == true ) // PPM1 is valid
+            if ( ppm_flag[PPM_CH1].ppm_live_ready == true ) // PPM1 is ready for live output
             {
                 if( servo_change & ( 1 << ppm_defn[PPM_CH1].ppm_pin ) ) // Check if we have a pin change on PPM1 input
                 {
@@ -1605,7 +1652,7 @@ ISR( SERVO_INT_VECTOR )
         }
         else // PPM2 is selected
         {
-            if ( ppm_flag[PPM_CH2].ppm_valid == true ) // PPM2 is valid
+            if ( ppm_flag[PPM_CH2].ppm_live_ready == true ) // PPM2 is ready for live output
             {
                 if( servo_change & ( 1 << ppm_defn[PPM_CH2].ppm_pin ) ) // Check if we have a pin change on PPM2 input
                 {
@@ -1635,11 +1682,11 @@ ISR( SERVO_INT_VECTOR )
         }
         else if ( servo_change & ( 1 << ppm_defn[PPM_CH1].ppm_pin ) ) // If we have only a change on input 1
         {
-            ppm_decoder ( PPM_CH1 );   // run decoder function PPM1 input
+            ppm_decoder ( PPM_CH1 );   // run decoder function for PPM1 input
         }
         else // We have only a change on input 2
         {
-            ppm_decoder ( PPM_CH2 );   // run decoder function PPM2 input
+            ppm_decoder ( PPM_CH2 );   // run decoder function for PPM2 input
         }
         // End : Task optimizer
 
@@ -1650,6 +1697,7 @@ ISR( SERVO_INT_VECTOR )
 		// Check for PPM1 validity
 		if ( ppm_flag[PPM_CH1].ppm_valid == true ) // If PPM1 is valid
 		{
+            ppm_switchover_invalid_inputs_detection_started = false; // Reset invalid inputs timeout detection flag to be ready for a new detection
             #if ( PPM_SWITCHOVER_CHANNEL != 0 ) // Enable switchover forcing only if switchover function enabled
             
                 // check for PPM2 forcing (through PPM1 force channel)
@@ -1661,19 +1709,40 @@ ISR( SERVO_INT_VECTOR )
                     {
                         if ( ppm_flag[PPM_CH2].ppm_valid == true ) // If PPM2 is valid
                         {
-                            if ( ppm2_switchover == false ) // If PPM2 is not yet selected
+                            if ( ppm_flag[PPM_CH2].ppm_live_ready == false ) // If PPM2 is not live
                             {
-                                ppm2_switchover = true; // Switch to PPM2
-                                switchover_delay_2_to_1 = SWITCHOVER_2_to_1_DELAY; // Preset SWITCHOVER_2_to_1_DELAY delay to cancel it (fast return to PPM1 if needed)
-                            } // Else if PPM2 is selected : return
+                                if ( ppm_generator_active == true ) // If ppm generator is active, we need to stop it
+                                {
+                                    ppm_generator_stop_request = true;
+                                }
+                                else // ppm generator is stopped
+                                {
+                                    if ( ppm_flag[PPM_CH2].ppm_frame_completed == true ) // Wait for last PPM2 channel before switching
+                                    {
+                                        ppm2_switchover = true; // Switch to PPM2
+                                        ppm_flag[PPM_CH2].ppm_live_ready = true; // Declare input ppm2 ready for live output
+                                        ppm_flag[PPM_CH1].ppm_live_ready = false; // Declare input ppm1 not ready for live output
+                                        switchover_delay_2_to_1 = SWITCHOVER_2_to_1_DELAY; // Preset SWITCHOVER_2_to_1_DELAY delay to cancel it (fast return to PPM1 if needed)
+                                    } // Else return
+                                }
+                            } // Else if PPM2 is live : return
                         }
                         else // PPM2 is not valid
                         {
                             if ( ppm2_switchover == true ) // If PPM2 is selected
                             {
-                                if ( ppm_flag[PPM_CH1].ppm_frame_completed == true )	// Wait for last PPM1 channel before switching
+                                if ( ppm_generator_active == true ) // If ppm generator is active, we need to stop it
                                 {
-                                    ppm2_switchover = false; // Switch to PPM1
+                                    ppm_generator_stop_request = true;
+                                }
+                                else // The ppm generator is not active or has been stopped
+                                {
+                                    if ( ppm_flag[PPM_CH1].ppm_frame_completed == true )	// Wait for last PPM1 channel before switching
+                                    {
+                                        ppm2_switchover = false; // Switch to PPM1
+                                        ppm_flag[PPM_CH1].ppm_live_ready = true; // Declare input ppm1 ready for live output
+                                        ppm_flag[PPM_CH2].ppm_live_ready = false; // Declare input ppm2 not ready for live output
+                                    }
                                 }
                             }
                         }
@@ -1681,55 +1750,100 @@ ISR( SERVO_INT_VECTOR )
                     else // Channel 2 forcing is not active
                     {
             #endif
-                        if ( ppm2_switchover == true ) // If PPM1 is not selected
+                        if ( ppm_flag[PPM_CH1].ppm_live_ready == false ) // If PPM1 is not live
                         {
-                            if ( ppm_flag[PPM_CH1].ppm_frame_completed == true ) // Wait for each frame completion before to count and switch
+                            if ( ppm_flag[PPM_CH1].ppm_frame_completed == true ) // Increment counter at each frame completion
                             {
-                                // wait for SWITCHOVER_2_to_1_DELAY before switching to PPM1. If PPM2 is invalid then switch immediately
-                                if ( ( ++switchover_delay_2_to_1 >= SWITCHOVER_2_to_1_DELAY ) || ( ppm_flag[PPM_CH2].ppm_valid == false ) )
+                                switchover_delay_2_to_1++;
+                            }
+                            // wait for SWITCHOVER_2_to_1_DELAY before switching to PPM1. If PPM2 is invalid then switch immediately
+                            if ( ( switchover_delay_2_to_1 >= SWITCHOVER_2_to_1_DELAY ) || ( ppm_flag[PPM_CH2].ppm_valid == false ) )
+                            {
+                                if ( ppm_generator_active == true ) // If ppm generator is active, we need to stop it
                                 {
-                                    ppm2_switchover = false; // Switch to PPM1
-                                    switchover_delay_2_to_1 = 0; // reset switchover delay
+                                    ppm_generator_stop_request = true;
+                                }
+                                else // The ppm generator is not active or has been stopped
+                                {
+                                    if ( ppm_flag[PPM_CH1].ppm_frame_completed == true )	// Wait for a new frame start before switching
+                                    {
+                                        ppm2_switchover = false; // Switch to PPM1
+                                        ppm_flag[PPM_CH1].ppm_live_ready = true;  // Declare input ppm1 ready for live output
+                                        ppm_flag[PPM_CH2].ppm_live_ready = false; // Declare input ppm2 not ready for live output
+                                        switchover_delay_2_to_1 = 0; // reset switchover delay
+                                    }
                                 }
                             }
                         }
                         else // If PPM1 is selected
                         {
                             switchover_delay_2_to_1 = 0; // reset switchover delay
-                        }
+                        } // return
             #if ( PPM_SWITCHOVER_CHANNEL != 0 ) // Check for switchover forcing only if switchover function enabled
                     }
             #endif
 		}
 		else // PPM1 is not valid
 		{
-			if ( ppm_flag[PPM_CH2].ppm_valid == true ) // If PPM2 is valid
+            if ( ppm_flag[PPM_CH2].ppm_valid == true ) // If PPM2 is valid
 			{
-				if ( ppm2_switchover == false ) // If PPM2 is not yet selected
+				ppm_switchover_invalid_inputs_detection_started = false; // Reset invalid inputs timeout detection flag to be ready for a new detection
+                
+                if ( ppm_flag[PPM_CH2].ppm_live_ready == false) // If PPM2 is not live
 				{
-					// Todo : Optional switchover delay 1 to 2 here
-                    if ( ppm_flag[PPM_CH2].ppm_frame_completed == true )	// Wait for last PPM2 channel before switching
+                    if ( ppm_generator_active == true ) // If ppm generator is active, we need to stop it
                     {
-                        ppm2_switchover = true; // Switch to PPM2
+                        ppm_generator_stop_request = true;
                     }
-				}
+                    else // ppm generator is stopped
+                    {
+                        if ( ppm_flag[PPM_CH2].ppm_frame_completed == true )	// Wait for a new frame start before switching
+                        {
+                            ppm2_switchover = true; // Switch to PPM2
+                            ppm_flag[PPM_CH2].ppm_live_ready = true; // Declare input ppm2 ready for live output
+                            ppm_flag[PPM_CH1].ppm_live_ready = false; // Declare input ppm1 not ready for live output
+                        }
+                    }
+				} // Else return
 			}
 			else // PPM2 is not valid, both inputs are invalid
 			{
-                #if ( _FAILSAFE_METHOD_ != ( FAILSAFE_MUTE ) ) // We can start the ppm generator if we are not in FAILSAFE_MUTE mode
-                                        
-                    if( !ppm_generator_active ) // Avoid restarting
+                if( !ppm_generator_active ) // If ppm generator is disabled
+                {
+                    // force PPM output pin to standby level (high for negative PPM, low for positive PPM)
+                    #ifdef _POSITIVE_PPM_FRAME_
+                        PPM_PORT &= ~(1 << PPM_OUTPUT_PIN); // Set PPM output pin low
+                    #else
+                        PPM_PORT |= (1 << PPM_OUTPUT_PIN); // Set PPM output pin high
+                    #endif
+                    ppm2_switchover = false;                    // Reset Switchover
+                
+                #if ( _FAILSAFE_METHOD_ != ( FAILSAFE_MUTE ) ) // Start the ppm generator if we are not in FAILSAFE_MUTE mode
+                    
+                    // Wait some time before to start the ppm generator
+                    if ( ppm_switchover_invalid_inputs_detection_started == true ) // If timeout detection is started
                     {
-                        // Load failsafe values on all channels
-                        for( uint8_t i = 0; i < PPM_ARRAY_MAX; i++ )
+                        if ( ( servo_time - ppm_switchover_invalid_inputs_timestamp ) > INVALID_INPUTS_TIMEOUT ) // Check timeout
                         {
-                            ppm[ i ] = failsafe_ppm[ i ];
+                            ppm_switchover_invalid_inputs_detection_started = false; // Reset invalid inputs timeout detection flag to be ready for a new detection
+
+                            for( uint8_t i = 0; i < PPM_ARRAY_MAX; i++ ) // Load failsafe values on all channels
+                            {
+                                ppm[ i ] = failsafe_ppm[ i ];
+                            }
+                            ppm_flag[PPM_CH1].ppm_live_ready = false; // Reset live ready flags for both inputs
+                            ppm_flag[PPM_CH2].ppm_live_ready = false;
+                            
+                            ppm_generator_start(); // Start the ppm generator
                         }
-                        // Start the ppm generator
-                        ppm_start();
+                    }
+                    else // If invalid inputs timeout detection is not yet started, we start it
+                    {
+                        ppm_switchover_invalid_inputs_detection_started = true; // Set invalid inputs detection started flag
+                        ppm_switchover_invalid_inputs_timestamp  = servo_time; // Store timestamp for timeout detection
                     }
                 #endif
-                ppm2_switchover = false; // Reset Switchover
+                }
 			}
 		}
       
@@ -1906,6 +2020,17 @@ ISR( PPM_INT_VECTOR, ISR_NOBLOCK )
             led_delay2 = 0;
         }
         */
+        }
+        else // We are in PPM redundancy mode
+        {
+            if ( ppm_generator_stop_request == true) // If a generator stop has been requested
+            {
+                if ( ppm_out_channel == 0 ) // We are at the frame end
+                {
+                    ppm_generator_stop(); // Stop the generator
+                    ppm_generator_stop_request = false;
+                }
+            }
         }
         #endif
         
